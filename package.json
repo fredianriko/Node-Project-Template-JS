@@ -4,15 +4,31 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node src/app.js"
+    "dev": "nodemon src/app.js",
+    "start": "node src/app.js",
+    "migrate:up": "cd src/database-migration && npx sequelize-cli db:migrate ",
+    "migrate:undo": "cd src/database-migration && npx sequelize-cli db:migrate:undo",
+    "seed:up": "cd src/database-migration && npx sequelize-cli db:seed:all",
+    "seed:undo": "cd src/database-migration && npx sequelize-cli db:seed:undo"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@postman/postman-sdk": "^0.1.6",
     "cors": "^2.8.5",
     "dotenv": "^16.0.3",
     "express": "^4.18.2",
-    "mysql2": "^3.2.0"
+    "mysql2": "^3.2.0",
+    "sequelize": "^6.29.3"
+  },
+  "devDependencies": {
+    "@faker-js/faker": "^7.6.0",
+    "eslint": "^8.41.0",
+    "eslint-config-airbnb-base": "^15.0.0",
+    "eslint-plugin-import": "^2.27.5",
+    "faker": "^5.5.3",
+    "nodemon": "^2.0.22",
+    "sequelize-cli": "^6.6.0"
   }
 }

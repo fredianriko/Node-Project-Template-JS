@@ -1,0 +1,566 @@
+image: cirrusci/flutter:2.10.3
+
+
+.core_packages_before_script:
+ before_script:
+   - "command -v ssh-agent >/dev/null || ( apt-get update -y && apt-get install openssh-client -y )"
+
+
+   ##
+   ## Run ssh-agent (inside the build environment)
+   ##
+   - eval $(ssh-agent)
+
+
+   ##
+   ## Add the SSH key stored in CI_SSH_PRIVATE_KEY variable to the agent store
+   ## We're using tr to fix line endings which makes ed25519 keys work
+   ## without extra base64 encoding.
+   ## https://gitlab.com/gitlab-examples/ssh-private-key/issues/1#note_48526556
+   ##
+   - echo "$CI_SSH_PRIVATE_KEY" | tr -d '\r' > id_ed25519
+
+
+   ##
+   ## Create the SSH directory and give it the right permissions
+   ##
+   - chmod 600 id_ed25519
+   - ssh-add -k id_ed25519
+   - mkdir -p /root/.ssh/
+   - ssh-keyscan -t rsa gitlab.com > /root/.ssh/known_hosts
+
+
+   ## Get package for isafe_ui
+   - cd modules/isafe_ui
+   - flutter clean && flutter pub get
+   - cd ../..
+
+
+   ## Get package for isafe_flutter
+   - flutter clean && flutter pub get
+
+
+.fastlane_before_script_android:
+ before_script:
+   - gem install bundler
+   - cd android
+   - bundle install
+
+
+# The local machine must install rbenv and ruby version 2.7.4
+.fastlane_before_script_ios:
+ before_script:
+   - eval "$(rbenv init - bash)"
+   - rbenv shell 2.7.4
+   - gem install bundler
+   - unset cd # If using RVM in your local machine, use this script
+   - cd ios
+   - bundle install
+
+
+.maintainer_rules:
+ rules:
+   - if: '$GITLAB_USER_LOGIN != "tijani.fadhilah" && $GITLAB_USER_LOGIN != "afriwan.ahda"'
+     when: never
+
+
+stages:
+ - test
+ - report
+ - build
+ - deploy
+
+
+test:unit-test:
+ extends: .core_packages_before_script
+ stage: test
+ environment:
+   name: Test
+ coverage: '/\s*lines\.*:\s*([\d\.]+%)/'
+ script:
+   - ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
+   # isafe_flutter analyze and test
+   - flutter analyze
+   - flutter test --machine --coverage test/app_test.dart > tests.output
+   - lcov -r coverage/lcov.info '*/__test*__/*' -o coverage/lcov_cleaned.info
+   - genhtml coverage/lcov_cleaned.info --output=coverage
+   # isafe_ui module analyze and test
+   # TODO(Jani): Enable later after housekeeping on isafe_module
+   # - cd modules/isafe_ui
+   # - flutter analyze
+   # - flutter test --coverage test/isafe_ui_test.dart
+   # - lcov -r coverage/lcov.info '*/__test*__/*' -o coverage/lcov_cleaned.info
+   # - genhtml coverage/lcov_cleaned.info --output=coverage/isafe_ui
+ interruptible: true
+ allow_failure: false
+ artifacts:
+   paths:
+     - coverage
+     - tests.output
+     # TODO(Jani): Enable later after housekeeping on isafe_module
+     # - modules/isafe_ui/coverage/isafe_ui
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "develop"'
+     when: manual
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "master"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^feature.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^bugfix.*/"
+     when: manual
+   - if: $CI_PIPELINE_SOURCE == "web"
+     when: manual
+ tags:
+   - aliyun-cassiopeia
+
+
+report:sonarqube:
+ stage: report
+ image:
+   name: sonarsource/sonar-scanner-cli:latest
+   entrypoint: [""]
+ variables:
+   SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar" # Defines the location of the analysis task cache
+   GIT_DEPTH: "0" # Tells git to fetch all the branches of the project, required by the analysis task
+ cache:
+   key: "${CI_JOB_NAME}"
+   paths:
+     - .sonar/cache
+ script:
+   - sonar-scanner
+ allow_failure: false
+ needs: ["test:unit-test"]
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "develop"'
+     when: manual
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "master"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^feature.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^bugfix.*/"
+     when: manual
+   - if: $CI_PIPELINE_SOURCE == "web"
+     when: manual
+ tags:
+   - aliyun-cassiopeia
+
+
+# ANDROID SECTION
+build:android:dev:
+ extends: .core_packages_before_script
+ stage: build
+ environment:
+   name: Dev
+ script:
+   - cd android
+   - echo $DEV_KEYSTORE_FILE | base64 -d > isafeDebugKey.jks
+   - cd app/src
+   - mkdir dev && cd dev
+   - echo $DEV_GOOGLE_SERVICE_JSON | base64 -d > google-services.json
+   - >
+     flutter build apk --release
+     --obfuscate --split-debug-info=symbols
+     --build-number=$DEV_BUILD_NUMBER
+     --flavor dev
+     --dart-define=BASE_URL=$DEV_BASE_ANDROID_URL
+     --dart-define=BASE_URL_PORTAL=$DEV_BASE_URL_PORTAL
+     --dart-define=GOOGLEMAP_API_KEY=$DEV_GOOGLEMAP_API_KEY
+     --dart-define=DEFAULT_MS_TIMEOUT=$DEFAULT_TIMEOUT
+     --dart-define=ENV=UAT
+     --dart-define=SENTRY_DSN=$DEV_SENTRY_DSN
+ after_script:
+   - rm -f android/isafeDebugKey.jks
+   - rm -f android/app/src/dev/google-services.json
+ allow_failure: true
+ needs: ["report:sonarqube"]
+ artifacts:
+   paths:
+     - build/app/outputs/flutter-apk/app-dev-release.apk
+     - symbols
+   expire_in: 1 week
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "develop"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^feature.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^bugfix.*/"
+     when: manual
+ tags:
+   - aliyun-cassiopeia
+
+
+build:android:stg:
+ extends: .core_packages_before_script
+ stage: build
+ environment:
+   name: Staging
+ script:
+   - cd android
+   - echo $KEYSTORE_FILE | base64 -d > isafeReleaseKey.jks
+   - cd app/src
+   - mkdir prod && cd prod
+   - echo $GOOGLE_SERVICE_JSON | base64 -d > google-services.json
+   - >
+     flutter build appbundle --release
+     --obfuscate --split-debug-info=symbols
+     --build-number=$STG_BUILD_NUMBER
+     --flavor prod
+     --dart-define=BASE_URL=$STG_ANDROID_BASE_URL
+     --dart-define=BASE_URL_PORTAL=$STG_BASE_URL_PORTAL
+     --dart-define=GOOGLEMAP_API_KEY=$GOOGLEMAP_API_KEY
+     --dart-define=DEFAULT_MS_TIMEOUT=$DEFAULT_TIMEOUT
+     --dart-define=ENV=PROD
+     --dart-define=ENV_TAG=STAGING
+     --dart-define=SENTRY_DSN=$DEV_SENTRY_DSN
+ after_script:
+   - rm -f android/isafeReleaseKey.jks
+   - rm -f android/app/src/prod/google-services.json
+ allow_failure: true
+ needs: ["report:sonarqube"]
+ artifacts:
+   paths:
+     - build/app/outputs/bundle/prodRelease/app-prod-release.aab
+     - symbols
+   expire_in: 1 week
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+ tags:
+   - aliyun-cassiopeia
+
+
+build:android:prod:
+ extends: .core_packages_before_script
+ stage: build
+ environment:
+   name: Production
+ script:
+   - cd android
+   - echo $KEYSTORE_FILE | base64 -d > isafeReleaseKey.jks
+   - cd app/src
+   - mkdir prod && cd prod
+   - echo $GOOGLE_SERVICE_JSON | base64 -d > google-services.json
+   - >
+     flutter build appbundle --release
+     --obfuscate --split-debug-info=symbols
+     --build-number=$BUILD_NUMBER
+     --flavor prod
+     --dart-define=BASE_URL=$ANDROID_BASE_URL
+     --dart-define=BASE_URL_PORTAL=$BASE_URL_PORTAL
+     --dart-define=GOOGLEMAP_API_KEY=$GOOGLEMAP_API_KEY
+     --dart-define=DEFAULT_MS_TIMEOUT=$DEFAULT_TIMEOUT
+     --dart-define=ENV=PROD
+     --dart-define=SENTRY_DSN=$PROD_SENTRY_DSN
+ after_script:
+   - rm -f android/isafeReleaseKey.jks
+   - rm -f android/app/src/prod/google-services.json
+ allow_failure: false
+ needs: ["report:sonarqube"]
+ artifacts:
+   paths:
+     - build/app/outputs/bundle/prodRelease/app-prod-release.aab
+     - symbols
+   expire_in: 1 week
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "master"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+ tags:
+   - aliyun-cassiopeia
+
+
+deploy:android:dev:firebase:
+ extends: .fastlane_before_script_android
+ stage: deploy
+ environment:
+   name: Dev
+ script:
+   - echo $DEV_SERVICE_ACC | base64 -d > firebase-app-cd-service-account.json
+   - bundle exec fastlane deploy_android_firebase app_id:$DEV_APP_ID service_acc:$DEV_SERVICE_ACC_PATH file_name:app-dev-release
+ after_script:
+   - rm -f android/firebase-app-cd-service-account.json
+ allow_failure: true
+ needs: ["build:android:dev"]
+ dependencies:
+   - build:android:dev
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "develop"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^feature.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^bugfix.*/"
+     when: manual
+ tags:
+   - aliyun-cassiopeia
+
+
+deploy:android:stg:internal-track:
+ extends: .fastlane_before_script_android
+ stage: deploy
+ environment:
+   name: Staging
+ script:
+   - echo $PLAYSTORE_SERVICE_ACC | base64 -d > playstore_service_acc.json
+   - fastlane deploy_android_playstore track:internal
+ after_script:
+   - rm -f playstore_service_acc.json
+ allow_failure: true
+ needs: ["build:android:stg"]
+ dependencies:
+   - build:android:stg
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+ tags:
+   - aliyun-cassiopeia
+
+
+deploy:android:prod:internal-track:
+ extends: .fastlane_before_script_android
+ stage: deploy
+ environment:
+   name: Production
+ script:
+   - echo $PLAYSTORE_SERVICE_ACC | base64 -d > playstore_service_acc.json
+   - fastlane deploy_android_playstore track:internal
+ after_script:
+   - rm -f playstore_service_acc.json
+ allow_failure: true
+ needs: ["build:android:prod"]
+ dependencies:
+   - build:android:prod
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "master"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+ tags:
+   - aliyun-cassiopeia
+
+
+deploy:android:prod:alpha-track:
+ extends: .fastlane_before_script_android
+ stage: deploy
+ environment:
+   name: Production
+ script:
+   - echo $PLAYSTORE_SERVICE_ACC | base64 -d > playstore_service_acc.json
+   - fastlane deploy_android_playstore track:alpha
+ after_script:
+   - rm -f playstore_service_acc.json
+ allow_failure: true
+ needs: ["build:android:prod"]
+ dependencies:
+   - build:android:prod
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "master"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+ tags:
+   - aliyun-cassiopeia
+
+
+# iOS SECTION
+build:ios:dev:
+ extends: .fastlane_before_script_ios
+ stage: build
+ environment:
+   name: Dev
+ script:
+   - mkdir -p config/dev && cd config/dev
+   - echo $DEV_GOOGLE_SERVICE_INFO_PLIST | base64 -d > GoogleService-Info.plist
+   - cd ../../
+   - bundle exec fastlane build_ios_dev build_number:$DEV_BUILD_NUMBER_IOS match_password:$DEV_MATCH_PASSWORD base_url:$DEV_BASE_IOS_URL base_url_portal:$DEV_BASE_URL_PORTAL googlemap_api_key:$DEV_GOOGLEMAP_API_KEY default_timeout:$DEFAULT_TIMEOUT sentry_dsn:$DEV_SENTRY_DSN
+ allow_failure: true
+ needs: ["report:sonarqube"]
+ artifacts:
+   paths:
+     - ios/Runner.ipa
+     - symbols
+   expire_in: 1 week
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "develop"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^feature.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^bugfix.*/"
+     when: manual
+ tags:
+   - isafe-flutter-tijani-mbp-shell-runner
+
+
+build:ios:stg:
+ extends: .fastlane_before_script_ios
+ stage: build
+ environment:
+   name: Staging
+ script:
+   - mkdir -p config/prod && cd config/prod
+   - echo $GOOGLE_SERVICE_INFO_PLIST | base64 -d > GoogleService-Info.plist
+   - cd ../../
+   - bundle exec fastlane build_ios_stg build_number:$STG_BUILD_NUMBER_IOS match_password:$STG_MATCH_PASSWORD base_url:$STG_IOS_BASE_URL base_url_portal:$STG_BASE_URL_PORTAL googlemap_api_key:$GOOGLEMAP_API_KEY default_timeout:$DEFAULT_TIMEOUT type:$FASTLANE_MATCH_TYPE sentry_dsn:$DEV_SENTRY_DSN
+ allow_failure: true
+ needs: ["report:sonarqube"]
+ artifacts:
+   paths:
+     - ios/Runner-stg.ipa
+     - symbols
+   expire_in: 1 week
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+ tags:
+   - isafe-flutter-tijani-mbp-shell-runner
+
+
+build:ios:prod:
+ extends: .fastlane_before_script_ios
+ stage: build
+ environment:
+   name: Production
+ script:
+   - mkdir -p config/prod && cd config/prod
+   - echo $GOOGLE_SERVICE_INFO_PLIST | base64 -d > GoogleService-Info.plist
+   - cd ../../
+   - bundle exec fastlane build_ios_prod build_number:$BUILD_NUMBER_IOS match_password:$MATCH_PASSWORD base_url:$IOS_BASE_URL base_url_portal:$BASE_URL_PORTAL googlemap_api_key:$GOOGLEMAP_API_KEY default_timeout:$DEFAULT_TIMEOUT type:$FASTLANE_MATCH_TYPE sentry_dsn:$PROD_SENTRY_DSN
+ allow_failure: false
+ needs: ["report:sonarqube"]
+ artifacts:
+   paths:
+     - ios/Runner-prod.ipa
+     - symbols
+   expire_in: 1 week
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "master"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+ tags:
+   - isafe-flutter-tijani-mbp-shell-runner
+
+
+deploy:ios:dev:firebase:
+ extends: .fastlane_before_script_ios
+ stage: deploy
+ environment:
+   name: Dev
+ script:
+   - echo $DEV_SERVICE_ACC | base64 -d > firebase-app-cd-service-account.json
+   - bundle exec fastlane deploy_ios_firebase app_id:$DEV_APP_ID_IOS service_acc:$DEV_SERVICE_ACC_PATH_IOS file_name:app-dev-release
+ after_script:
+   - rm -f ios/firebase-app-cd-service-account.json
+ allow_failure: true
+ needs: ["build:ios:dev"]
+ dependencies:
+   - build:ios:dev
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "develop"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^feature.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^bugfix.*/"
+     when: manual
+ tags:
+   - isafe-flutter-tijani-mbp-shell-runner
+
+
+deploy:ios:stg:
+ extends: .fastlane_before_script_ios
+ stage: deploy
+ environment:
+   name: Staging
+ script:
+   - echo $APPSTORE_API_KEY | base64 -d > api_key.p8
+   - bundle exec fastlane deploy_ios_testflight api_key_path:$APPSTORE_API_KEY_PATH
+ allow_failure: true
+ needs: ["build:ios:stg"]
+ dependencies:
+   - build:ios:stg
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+ tags:
+   - isafe-flutter-tijani-mbp-shell-runner
+
+
+deploy:ios:prod:
+ extends: .fastlane_before_script_ios
+ stage: deploy
+ environment:
+   name: Production
+ script:
+   - echo $APPSTORE_API_KEY | base64 -d > api_key.p8
+   - bundle exec fastlane deploy_ios_testflight api_key_path:$APPSTORE_API_KEY_PATH
+ allow_failure: true
+ needs: ["build:ios:prod"]
+ dependencies:
+   - build:ios:prod
+ rules:
+   - !reference [.maintainer_rules, rules]
+   - if: '$CI_COMMIT_MESSAGE =~ /^Merge branch.*/ && $CI_COMMIT_BRANCH == "master"'
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^release.*/"
+     when: manual
+   - if: "$CI_COMMIT_MESSAGE =~ /^CICD.*/ && $CI_COMMIT_BRANCH =~ /^hotfix.*/"
+     when: manual
+ tags:
+   - isafe-flutter-tijani-mbp-shell-runner
+
+
+

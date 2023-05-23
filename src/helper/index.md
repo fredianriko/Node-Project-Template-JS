@@ -1,0 +1,2 @@
+- Helper functions goes here
+- All helper functions must be reusable globally
